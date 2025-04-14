@@ -39,12 +39,23 @@ public class YoloController : MonoBehaviour
     private int fpsFrames = 0;
     private float fpsTimeLeft;
 
+    private bool isProcessing = false;
+
     private void Start()
     {
         try
         {
             string modelPath = System.IO.Path.Combine(Application.streamingAssetsPath, modelFile);
             Debug.Log($"Model path: {modelPath}");
+            if (!System.IO.File.Exists(modelPath))
+            {
+                Debug.LogError($"Model file does not exist at {modelPath}");
+                return;
+            }
+            else
+            {
+                Debug.Log($"Model file exists at {modelPath}");
+            }
             var options = new InterpreterOptions();
             options.threads = SystemInfo.processorCount;
 
@@ -98,17 +109,25 @@ public class YoloController : MonoBehaviour
     private void Update()
     {
         if (webCamTexture == null || !webCamTexture.isPlaying) return;
+
         UpdateFPS();
-        StartCoroutine(ProcessFrame());
+
+        if (!isProcessing)
+        {
+            StartCoroutine(ProcessFrame());
+        }
     }
 
     private IEnumerator ProcessFrame()
     {
+        isProcessing = true;
         yield return new WaitForEndOfFrame();
 
         ProcessInputTexture();
         RunInference();
         ProcessOutput();
+
+        isProcessing = false;
     }
 
     private void ProcessInputTexture()
@@ -160,6 +179,9 @@ public class YoloController : MonoBehaviour
 
         interpreter.GetOutputTensorData(0, output0);
         interpreter.GetOutputTensorData(1, output1);
+
+        Debug.Log($"First output box: x={output0[0, 0, 0]}, y={output0[0, 0, 1]}, w={output0[0, 0, 2]}, h={output0[0, 0, 3]}");
+        Debug.Log($"First output score: class 0 score={output1[0, 0, 0]}");
     }
 
     private void ProcessOutput()
@@ -244,44 +266,61 @@ public class YoloController : MonoBehaviour
 
     private void VisualizeDetections()
     {
-        // Buraya çizim veya UI göstergeleri eklenebilir
+        Debug.Log($"Detected {detections.Count} objects");
+
+        foreach (var detection in detections)
+        {
+            // Kutu koordinatları: x, y, genişlik, yükseklik
+            float x = detection.rect.x * inputTexture.width;
+            float y = detection.rect.y * inputTexture.height;
+            float w = detection.rect.width * inputTexture.width;
+            float h = detection.rect.height * inputTexture.height;
+
+            // Kutu çizimi
+            DrawBoundingBox(x, y, w, h);
+
+            // Skoru ve sınıfı logla
+            Debug.Log($"Detection: Class {detection.classId}, Score: {detection.score}");
+        }
+    }
+
+    private void DrawBoundingBox(float x, float y, float w, float h)
+    {
+        Vector3[] worldCorners = new Vector3[4];
+        worldCorners[0] = new Vector3(x, y, 0);
+        worldCorners[1] = new Vector3(x + w, y, 0);
+        worldCorners[2] = new Vector3(x, y + h, 0);
+        worldCorners[3] = new Vector3(x + w, y + h, 0);
+
+        // Dünyadaki köşeleri ekran köşelerine dönüştürme
+        Vector3[] screenCorners = new Vector3[4];
+        for (int i = 0; i < worldCorners.Length; i++)
+        {
+            screenCorners[i] = Camera.main.WorldToScreenPoint(worldCorners[i]);
+        }
+
+        // Kutu çizimi
+        Debug.DrawLine(screenCorners[0], screenCorners[1], Color.red);
+        Debug.DrawLine(screenCorners[1], screenCorners[3], Color.red);
+        Debug.DrawLine(screenCorners[3], screenCorners[2], Color.red);
+        Debug.DrawLine(screenCorners[2], screenCorners[0], Color.red);
     }
 
     private void UpdateFPS()
     {
-        fpsTimeLeft -= Time.deltaTime;
-        fpsAccumulator += Time.timeScale / Time.deltaTime;
+        fpsAccumulator += Time.deltaTime;
         fpsFrames++;
 
-        if (fpsTimeLeft <= 0f)
+        if (fpsAccumulator >= fpsUpdateInterval)
         {
-            float fps = fpsAccumulator / fpsFrames;
-            frameRateText.text = $"FPS: {fps:0.}";
-            fpsTimeLeft = fpsUpdateInterval;
-            fpsAccumulator = 0f;
+            float fps = fpsFrames / fpsAccumulator;
+            frameRateText.text = $"FPS: {fps:F1}";
+            fpsAccumulator = 0;
             fpsFrames = 0;
         }
     }
 
-    private void OnDestroy()
-    {
-        if (interpreter != null)
-        {
-            interpreter.Dispose();
-        }
-
-        if (webCamTexture != null)
-        {
-            webCamTexture.Stop();
-        }
-
-        if (inputTexture != null)
-        {
-            Destroy(inputTexture);
-        }
-    }
-
-    private struct Detection
+    public class Detection
     {
         public Rect rect;
         public int classId;

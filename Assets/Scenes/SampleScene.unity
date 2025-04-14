@@ -152,7 +152,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   modelFile: yolov4-416-fp32.tflite
-  scoreThreshold: 0.5
+  scoreThreshold: 0.2
   iouThreshold: 0.5
   cameraView: {fileID: 319019827}
   frameRateText: {fileID: 743476113}
@@ -206,7 +206,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 1200, y: 1000}
+  m_SizeDelta: {x: 1400, y: 1000}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &319019827
 MonoBehaviour:
