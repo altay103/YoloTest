@@ -21,6 +21,7 @@ public class YoloController : MonoBehaviour
     [Header("References")]
     public RawImage cameraView;
     public TextMeshProUGUI frameRateText;
+    public TextMeshProUGUI detectionCountText;
 
     private Interpreter interpreter;
     private float[,,,] inputTensor;
@@ -29,6 +30,7 @@ public class YoloController : MonoBehaviour
 
     private WebCamTexture webCamTexture;
     private Texture2D inputTexture;
+    private Texture2D resizedTexture;
 
     private int inputWidth = 416;
     private int inputHeight = 416;
@@ -40,6 +42,22 @@ public class YoloController : MonoBehaviour
     private float fpsTimeLeft;
 
     private bool isProcessing = false;
+
+    private List<Rect> boundingBoxPositions = new List<Rect>();
+
+    // COCO veri setindeki 80 sınıf için etiketler
+    private readonly string[] labels = new string[]
+    {
+        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+        "hair drier", "toothbrush"
+    };
 
     private void Start()
     {
@@ -61,6 +79,12 @@ public class YoloController : MonoBehaviour
 
             interpreter = new Interpreter(FileUtil.LoadFile(modelPath), options);
             interpreter.AllocateTensors();
+
+            // Çıktı tensorlarını başlangıçta oluştur
+            var outputInfo0 = interpreter.GetOutputTensorInfo(0);
+            var outputInfo1 = interpreter.GetOutputTensorInfo(1);
+            output0 = new float[outputInfo0.shape[0], outputInfo0.shape[1], outputInfo0.shape[2]];
+            output1 = new float[outputInfo1.shape[0], outputInfo1.shape[1], outputInfo1.shape[2]];
 
             LogModelInfo();
 
@@ -136,6 +160,10 @@ public class YoloController : MonoBehaviour
         {
             inputTexture = new Texture2D(webCamTexture.width, webCamTexture.height, TextureFormat.RGB24, false);
         }
+        if (resizedTexture == null)
+        {
+            resizedTexture = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
+        }
 
         inputTexture.SetPixels32(webCamTexture.GetPixels32());
         inputTexture.Apply();
@@ -144,14 +172,13 @@ public class YoloController : MonoBehaviour
         Graphics.Blit(inputTexture, rt);
         RenderTexture.active = rt;
 
-        Texture2D resized = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
-        resized.ReadPixels(new Rect(0, 0, inputWidth, inputHeight), 0, 0);
-        resized.Apply();
+        resizedTexture.ReadPixels(new Rect(0, 0, inputWidth, inputHeight), 0, 0);
+        resizedTexture.Apply();
 
         RenderTexture.active = null;
         RenderTexture.ReleaseTemporary(rt);
 
-        Color32[] pixels = resized.GetPixels32();
+        Color32[] pixels = resizedTexture.GetPixels32();
         for (int y = 0; y < inputHeight; y++)
         {
             for (int x = 0; x < inputWidth; x++)
@@ -162,31 +189,27 @@ public class YoloController : MonoBehaviour
                 inputTensor[0, y, x, 2] = color.b / 255f;
             }
         }
-
-        Destroy(resized);
     }
 
     private void RunInference()
     {
-        interpreter.SetInputTensorData(0, inputTensor);
-        interpreter.Invoke();
-
-        var outputInfo0 = interpreter.GetOutputTensorInfo(0);
-        var outputInfo1 = interpreter.GetOutputTensorInfo(1);
-
-        output0 = new float[outputInfo0.shape[0], outputInfo0.shape[1], outputInfo0.shape[2]];
-        output1 = new float[outputInfo1.shape[0], outputInfo1.shape[1], outputInfo1.shape[2]];
-
-        interpreter.GetOutputTensorData(0, output0);
-        interpreter.GetOutputTensorData(1, output1);
-
-        Debug.Log($"First output box: x={output0[0, 0, 0]}, y={output0[0, 0, 1]}, w={output0[0, 0, 2]}, h={output0[0, 0, 3]}");
-        Debug.Log($"First output score: class 0 score={output1[0, 0, 0]}");
+        try
+        {
+            interpreter.SetInputTensorData(0, inputTensor);
+            interpreter.Invoke();
+            interpreter.GetOutputTensorData(0, output0);
+            interpreter.GetOutputTensorData(1, output1);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Inference error: {e.Message}");
+        }
     }
 
     private void ProcessOutput()
     {
         detections.Clear();
+        boundingBoxPositions.Clear();
 
         int numDetections = output0.GetLength(1);
         int numClasses = output1.GetLength(2);
@@ -197,6 +220,12 @@ public class YoloController : MonoBehaviour
             float y = output0[0, i, 1];
             float w = output0[0, i, 2];
             float h = output0[0, i, 3];
+
+            // Koordinatları normalizasyon kontrolü
+            x = Mathf.Clamp01(x);
+            y = Mathf.Clamp01(y);
+            w = Mathf.Clamp01(w);
+            h = Mathf.Clamp01(h);
 
             float maxProb = 0;
             int classId = -1;
@@ -211,16 +240,16 @@ public class YoloController : MonoBehaviour
                 }
             }
 
-            float score = maxProb;
-            if (score < scoreThreshold) continue;
-
-            Rect rect = new Rect(x - w / 2, y - h / 2, w, h);
-            detections.Add(new Detection
+            if (maxProb >= scoreThreshold)
             {
-                rect = rect,
-                classId = classId,
-                score = score
-            });
+                Rect rect = new Rect(x - w / 2, y - h / 2, w, h);
+                detections.Add(new Detection
+                {
+                    rect = rect,
+                    classId = classId,
+                    score = maxProb
+                });
+            }
         }
 
         ApplyNonMaxSuppression();
@@ -270,40 +299,55 @@ public class YoloController : MonoBehaviour
 
         foreach (var detection in detections)
         {
-            // Kutu koordinatları: x, y, genişlik, yükseklik
             float x = detection.rect.x * inputTexture.width;
             float y = detection.rect.y * inputTexture.height;
             float w = detection.rect.width * inputTexture.width;
             float h = detection.rect.height * inputTexture.height;
 
-            // Kutu çizimi
             DrawBoundingBox(x, y, w, h);
 
-            // Skoru ve sınıfı logla
-            Debug.Log($"Detection: Class {detection.classId}, Score: {detection.score}");
+            string className = detection.classId < labels.Length ? labels[detection.classId] : "unknown";
+            Debug.Log($"Detection: Class {className}, Score: {detection.score:F2}");
+            detectionCountText.text = $"Detected: {className} ({detection.score:F2})";
         }
     }
 
     private void DrawBoundingBox(float x, float y, float w, float h)
     {
-        Vector3[] worldCorners = new Vector3[4];
-        worldCorners[0] = new Vector3(x, y, 0);
-        worldCorners[1] = new Vector3(x + w, y, 0);
-        worldCorners[2] = new Vector3(x, y + h, 0);
-        worldCorners[3] = new Vector3(x + w, y + h, 0);
+        // Ekran koordinatlarına çevir
+        float screenHeight = Screen.height;
+        float screenWidth = Screen.width;
 
-        // Dünyadaki köşeleri ekran köşelerine dönüştürme
-        Vector3[] screenCorners = new Vector3[4];
-        for (int i = 0; i < worldCorners.Length; i++)
+        // UI RawImage'in boyutlarını ve pozisyonunu al
+        RectTransform rt = cameraView.GetComponent<RectTransform>();
+        Vector2 size = rt.rect.size;
+        Vector2 position = rt.position;
+
+        // Koordinatları UI içinde ölçekle
+        float scaledX = (x / inputTexture.width) * size.x + position.x - (size.x / 2);
+        float scaledY = (1 - (y / inputTexture.height)) * size.y + position.y - (size.y / 2);
+        float scaledW = (w / inputTexture.width) * size.x;
+        float scaledH = (h / inputTexture.height) * size.y;
+
+        // GUI koordinatlarına çevir
+        scaledY = screenHeight - scaledY;
+
+        boundingBoxPositions.Add(new Rect(scaledX, scaledY, scaledW, scaledH));
+    }
+
+    private void OnGUI()
+    {
+        // Tespit kutularını çiz
+        GUI.color = Color.red;
+        foreach (var box in boundingBoxPositions)
         {
-            screenCorners[i] = Camera.main.WorldToScreenPoint(worldCorners[i]);
+            // Kutunun kenarlarını çiz
+            GUI.DrawTexture(new Rect(box.x, box.y, 2, box.height), Texture2D.whiteTexture); // Sol kenar
+            GUI.DrawTexture(new Rect(box.x + box.width, box.y, 2, box.height), Texture2D.whiteTexture); // Sağ kenar
+            GUI.DrawTexture(new Rect(box.x, box.y, box.width, 2), Texture2D.whiteTexture); // Üst kenar
+            GUI.DrawTexture(new Rect(box.x, box.y + box.height, box.width, 2), Texture2D.whiteTexture); // Alt kenar
         }
-
-        // Kutu çizimi
-        Debug.DrawLine(screenCorners[0], screenCorners[1], Color.red);
-        Debug.DrawLine(screenCorners[1], screenCorners[3], Color.red);
-        Debug.DrawLine(screenCorners[3], screenCorners[2], Color.red);
-        Debug.DrawLine(screenCorners[2], screenCorners[0], Color.red);
+        boundingBoxPositions.Clear(); // Her frame'de listeyi temizle
     }
 
     private void UpdateFPS()
